@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.user.linkedin-replies</string>
+
+  <!-- Set WorkingDirectory and ProgramArguments to absolute paths on the
+       Mac Studio. Adjust the venv path to your install location. -->
+  <key>WorkingDirectory</key>
+  <string>/Users/evgenovcinnikov/Desktop/vscode/linkedin replies</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/evgenovcinnikov/Desktop/vscode/linkedin replies/.venv/bin/python</string>
+    <string>/Users/evgenovcinnikov/Desktop/vscode/linkedin replies/daily_run.py</string>
+  </array>
+
+  <!-- launchd runs with a stripped PATH; ensure `claude` is reachable. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <!-- Daily at 09:00 local time. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>9</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/Users/evgenovcinnikov/Desktop/vscode/linkedin replies/logs/launchd.out</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/evgenovcinnikov/Desktop/vscode/linkedin replies/logs/launchd.err</string>
+
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>

@@ -1,0 +1,3 @@
+playwright>=1.40
+slack-sdk>=3.27
+python-dotenv>=1.0
