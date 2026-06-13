@@ -70,10 +70,12 @@ class Alert:
     lead_headline: str
     post_url: str
     post_text: str
+    alert_id: str = ""
 
     @property
     def post_id(self) -> str:
-        return hashlib.sha256(self.post_url.encode()).hexdigest()[:16]
+        key = self.alert_id or self.post_url
+        return hashlib.sha256(key.encode()).hexdigest()[:16]
 
 
 def load_seen() -> set[str]:
@@ -106,59 +108,66 @@ SALES_NAV_URL = os.environ.get(
     "https://www.linkedin.com/sales/home?alertGroup=LEAD&listId=7451883417308237824",
 )
 
-# JS that walks the alerts feed. Sales Nav DOM uses utility classes that
-# rotate, so we rely on structural cues: the alerts list is a region with
-# many cards; each card has the lead name as a link, a snippet of post text,
-# and a "View post"/"Read more" link to the LinkedIn post itself.
-#
-# Heuristics:
-#   - lead_name: first <a> inside the card whose href matches /sales/lead/
-#   - post_url: <a> with href matching /posts/ OR /feed/update/
-#   - post_text: largest text block under the card NOT inside the lead
-#     header.
-# If any card lacks a post_url it's treated as a non-post alert and skipped.
+# Walk the Sales Nav alerts feed. Cards are <article class="alert-card-new">
+# with a data-alert-id URN; only LEAD_SHARED_UPDATE ids are post-share
+# alerts (vs job-change, news, etc). The post URL is not in the DOM (Sales
+# Nav routes "View" through a JS click handler), so we use data-alert-id
+# as the stable dedup key and fall back to the lead's Sales Nav profile
+# URL for the Slack "view" link — the post text itself is captured in
+# full from the card.
 EXTRACT_JS = r"""
 () => {
   const out = [];
-  // Cards: every direct child of any list under main that has both a lead
-  // link and an external post link.
-  const candidates = Array.from(document.querySelectorAll('main li, main article'));
-  for (const card of candidates) {
-    const leadAnchor =
-      card.querySelector('a[href*="/sales/lead/"]') ||
-      card.querySelector('a[href*="/sales/people/"]');
-    const postAnchor =
-      card.querySelector('a[href*="/feed/update/"]') ||
-      card.querySelector('a[href*="/posts/"]');
-    if (!leadAnchor || !postAnchor) continue;
+  const cards = Array.from(document.querySelectorAll('article.alert-card-new'));
+  for (const card of cards) {
+    const alertId = card.getAttribute('data-alert-id') || '';
+    if (!alertId.includes('LEAD_SHARED_UPDATE')) continue;
 
-    const leadName = (leadAnchor.innerText || leadAnchor.textContent || "")
-      .trim().split("\n")[0];
-    const postUrl = postAnchor.href;
+    const profileLink = card.querySelector('a[aria-label^="View profile for"]');
+    let leadName = '';
+    let profileUrl = '';
+    if (profileLink) {
+      leadName = (profileLink.getAttribute('aria-label') || '')
+        .replace(/^View profile for\s+/, '').trim();
+      profileUrl = profileLink.href;
+    }
 
-    // Headline: nearest sibling line after the lead name link.
-    let leadHeadline = "";
-    const headlineEl = card.querySelector(
-      'a[href*="/sales/lead/"] + *, a[href*="/sales/people/"] + *'
-    );
-    if (headlineEl) leadHeadline = (headlineEl.innerText || "").trim().split("\n")[0];
+    const rawLines = (card.innerText || '')
+      .split('\n').map(l => l.trim()).filter(Boolean);
 
-    // Post text: longest text node block in the card that isn't the lead
-    // name itself. Replace newlines with spaces, collapse whitespace.
-    const blocks = Array.from(card.querySelectorAll('span, p, div'))
-      .map(el => (el.innerText || "").trim())
-      .filter(t => t.length > 40 && !t.includes(leadName.split(" ")[0] + " posted"));
-    const postText = blocks.sort((a, b) => b.length - a.length)[0] || "";
+    let i = 0;
+    if (rawLines[i] && /is online$/i.test(rawLines[i])) i++;
+    if (rawLines[i] && /\bshared a post$/i.test(rawLines[i])) i++;
 
-    out.push({ leadName, leadHeadline, postUrl, postText });
+    const leadHeadline = rawLines[i] || '';
+    if (leadHeadline) i++;
+
+    // Time-ago line: "15 hours", "2 days", "1 week", etc.
+    if (rawLines[i] && /^\d+\s+\w+$/.test(rawLines[i])) i++;
+
+    const bodyLines = [];
+    for (; i < rawLines.length; i++) {
+      const line = rawLines[i];
+      if (line === 'View') break;
+      if (line.startsWith('Clear this alert')) break;
+      bodyLines.push(line);
+    }
+
+    // Sales Nav renders the post body once as a truncated button preview
+    // and once in full — dedup identical lines.
+    const seen = new Set();
+    const uniqueBody = [];
+    for (const line of bodyLines) {
+      if (seen.has(line)) continue;
+      seen.add(line);
+      uniqueBody.push(line);
+    }
+    const postText = uniqueBody.join('\n').trim();
+
+    if (!leadName || !postText) continue;
+    out.push({ leadName, leadHeadline, profileUrl, alertId, postText });
   }
-  // Dedup by postUrl.
-  const seen = new Set();
-  return out.filter(a => {
-    if (seen.has(a.postUrl)) return false;
-    seen.add(a.postUrl);
-    return Boolean(a.leadName && a.postUrl && a.postText);
-  });
+  return out;
 }
 """
 
@@ -228,8 +237,9 @@ def scrape_alerts() -> list[Alert]:
         Alert(
             lead_name=a["leadName"],
             lead_headline=a["leadHeadline"],
-            post_url=a["postUrl"].split("?")[0],
+            post_url=(a.get("profileUrl") or "").split("?")[0],
             post_text=a["postText"],
+            alert_id=a.get("alertId", ""),
         )
         for a in raw
     ]
@@ -318,7 +328,8 @@ def post_to_slack(client: WebClient, channel: str, alert: Alert, variants: list[
     top_text = (
         f"*New post from {alert.lead_name}*"
         + (f" — _{alert.lead_headline}_" if alert.lead_headline else "")
-        + f"\n<{alert.post_url}|Open in LinkedIn>\n\n"
+        + (f"\n<{alert.post_url}|View lead in Sales Navigator>" if alert.post_url else "")
+        + "\n\n"
         + "> " + trunc(alert.post_text).replace("\n", "\n> ")
         + "\n\nReact 1️⃣ / 2️⃣ / 3️⃣ to pick. Reply in thread with edit notes (optional)."
     )
