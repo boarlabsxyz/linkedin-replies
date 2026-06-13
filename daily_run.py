@@ -262,7 +262,17 @@ def call_skill(alert: Alert) -> list[dict] | None:
     )
     try:
         proc = subprocess.run(
-            [CLAUDE_BIN, "-p", prompt, "--output-format", "json"],
+            [
+                CLAUDE_BIN,
+                "-p",
+                prompt,
+                "--output-format",
+                "json",
+                # Headless cron — auto-approve tool calls the skill needs
+                # (Read its own reference files, Drive/Docs MCP, etc.).
+                "--permission-mode",
+                "bypassPermissions",
+            ],
             capture_output=True,
             text=True,
             timeout=240,
